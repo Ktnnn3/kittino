@@ -9,6 +9,8 @@
 ```bash
 pip install -r requirements.txt
 
+```
+
 # Kittino - AI Model Package Manager
 
 ## 🔧 Usage
