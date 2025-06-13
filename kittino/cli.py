@@ -9,6 +9,10 @@ from datetime import datetime
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey # type: ignore
 from cryptography.hazmat.primitives import serialization # type: ignore
 
+import requests
+from rapidfuzz import process
+
+
 # path to kittino project -> create "vault" folder from home directory
 VAULT_DIR = Path.home() / ".kittino" / "vault"
 
@@ -17,6 +21,17 @@ RED = "\033[91m"
 YELLOW = "\033[93m"
 GREEN = "\033[92m"
 RESET = "\033[0m"
+
+TRUSTED_PUBLISHERS = [
+    "openai",
+    "meta",
+    "google",
+    "microsoft",
+    "stabilityai",
+    "facebook",
+    "anthropic"
+]
+
 
 
 def init_registry():
@@ -256,8 +271,20 @@ def list_models():
             print(f"  [✓] {name}@{version}  |  created_at: {created}")
         except Exception as e:
             print(f"{RED}[x] Failed to read {prov_file.name}: {e}{RESET}")
+            
+def model_exists_on_hf(model_id):
+    url = f"https://huggingface.co/api/models/{model_id}"
+    r = requests.get(url)
+    return r.status_code == 200
 
-
+def suggest_models_on_hf(query):
+    search_url = f"https://huggingface.co/api/models?search={query}"
+    r = requests.get(search_url)
+    if r.status_code != 200:
+        return []
+    model_ids = [model['modelId'] for model in r.json()]
+    matches = process.extract(query, model_ids, limit=3, score_cutoff=70)
+    return matches
 
 
 def main():
@@ -267,6 +294,8 @@ def main():
     subparsers.add_parser("init", help="Initialize the local Kittino vault")
     subparsers.add_parser("keygen", help="Generate a signing keypair")
     subparsers.add_parser("list", help="List all published models in the vault")
+    install_parser = subparsers.add_parser("install", help="Install a model from Hugging Face")
+
 
     publish_parser = subparsers.add_parser("publish", help="Publish a new model")
     publish_parser.add_argument("model_path", help="Path to the model file")
@@ -280,6 +309,8 @@ def main():
     audit_parser = subparsers.add_parser("audit", help="Audit a model for potential risks")
     audit_parser.add_argument("--name", required=True, help="Model name")
     audit_parser.add_argument("--version", required=True, help="Model version")
+    
+    install_parser.add_argument("model_id", help="Model ID (e.g. openai/whisper-large-v3-turbo)")
 
 
     args = parser.parse_args()
@@ -296,8 +327,30 @@ def main():
         audit_model(args.name, args.version)
     elif args.command == "list":
         list_models()
+    elif args.command == "install":
+        model_id = args.model_id
+        org = model_id.split('/')[0]
+
+        if not model_exists_on_hf(model_id):
+            print(f"{RED}[x] Model '{model_id}' not found on Hugging Face.{RESET}")
+            suggestions = suggest_models_on_hf(model_id)
+            if suggestions:
+                print(f"{YELLOW}Did you mean:{RESET}")
+                for match in suggestions:
+                    print(f"  - {match[0]}  (confidence: {match[1]:.1f}%)")
+            else:
+                print(f"{YELLOW}No similar models found.{RESET}")
+            return
+
+        if org not in TRUSTED_PUBLISHERS:
+            print(f"{YELLOW}[!] Warning: '{org}' is not in your trusted publishers list.{RESET}")
+            print("You may be installing from an untrusted source.")
+        else:
+            print(f"{GREEN}[✓] Model exists and trusted publisher detected: '{org}'{RESET}")
+        print(f"{GREEN}[✓] Model '{model_id}' is ready for download (not implemented yet).{RESET}")
     else:
         parser.print_help()
+
 
 if __name__ == "__main__":
     main()
