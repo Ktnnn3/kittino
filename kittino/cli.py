@@ -74,18 +74,41 @@ def sign_provenance(name, version):
         f.write(signature)
 
     print(f"[✓] Signed provenance → {sig_path.name}")
-
+    
 def publish_model(model_path, name, version):
     model_path = Path(model_path)
     if not model_path.exists():
         print(f"{RED}[x] Model file not found.{RESET}")
         return
 
-    model_hash = sha256sum(model_path)
-    dest_path = VAULT_DIR / "models" / model_hash
-    shutil.copy2(model_path, dest_path)
-    print(f"[+] Model stored as: {dest_path.name}")
+    # 1️⃣ Check if same name@version already published
+    safe_name = safe_filename(name)
+    prov_path = VAULT_DIR / "provenance" / f"{safe_name}@{version}.json"
+    if prov_path.exists():
+        print(f"{YELLOW}[!] This model {name}@{version} has already been published.{RESET}")
+        return
 
+    # 2️⃣ Compute hash of the model file
+    model_hash = sha256sum(model_path)
+
+    # 3️⃣ Check if same hash was previously published
+    existing_entry = provenance_exists_for_same_hash(model_hash)
+
+    dest_path = VAULT_DIR / "models" / model_hash
+
+    # 4️⃣ Only copy model file if not already stored
+    if not dest_path.exists():
+        shutil.copy2(model_path, dest_path)
+        print(f"[+] Model stored as: {dest_path.name}")
+    else:
+        print(f"[=] Model file already stored (hash matched): {dest_path.name}")
+
+    # 5️⃣ Warn if identical hash was already published under another version
+    if existing_entry:
+        existing_name, existing_version = existing_entry
+        print(f"{YELLOW}[!] Warning: identical model hash was already published as {existing_name}@{existing_version}{RESET}")
+
+    # 6️⃣ Build provenance metadata
     provenance = {
         "name": name,
         "version": version,
@@ -94,13 +117,13 @@ def publish_model(model_path, name, version):
         "created_at": datetime.utcnow().isoformat() + "Z",
     }
 
-    prov_path = VAULT_DIR / "provenance" / f"{name}@{version}.json"
     with open(prov_path, "w") as f:
         json.dump(provenance, f, indent=2)
 
     print(f"[+] Provenance written to: {prov_path.name}")
     sign_provenance(name, version)
     print(f"[✓] Publish complete!{RESET}")
+
 
 
 def verify_model(name, version):
@@ -331,6 +354,22 @@ def download_and_store_model(model_id):
 
 def safe_filename(model_id):
     return model_id.replace("/", "__")
+
+def provenance_exists_for_same_hash(model_hash):
+    provenance_dir = VAULT_DIR / "provenance"
+    if not provenance_dir.exists():
+        return None
+
+    for prov_file in provenance_dir.glob("*.json"):
+        try:
+            with open(prov_file, "r") as f:
+                data = json.load(f)
+            if data.get("hash") == model_hash:
+                return data.get("name"), data.get("version")
+        except:
+            continue
+    return None
+
 
 
 def main():
