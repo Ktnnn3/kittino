@@ -12,6 +12,9 @@ from cryptography.hazmat.primitives import serialization # type: ignore
 import requests
 from rapidfuzz import process
 
+from huggingface_hub import snapshot_download
+
+
 
 # path to kittino project -> create "vault" folder from home directory
 VAULT_DIR = Path.home() / ".kittino" / "vault"
@@ -58,13 +61,15 @@ def sign_provenance(name, version):
     with open(private_key_path, "rb") as f:
         private_key = serialization.load_pem_private_key(f.read(), password=None)
 
-    prov_path = VAULT_DIR / "provenance" / f"{name}@{version}.json"
+    safe_name = safe_filename(name)
+    prov_path = VAULT_DIR / "provenance" / f"{safe_name}@{version}.json"
+    #prov_path = VAULT_DIR / "provenance" / f"{name}@{version}.json"
     with open(prov_path, "rb") as f:
         prov_bytes = f.read()
 
     signature = private_key.sign(prov_bytes)
 
-    sig_path = VAULT_DIR / "signatures" / f"{name}@{version}.sig"
+    sig_path = VAULT_DIR / "signatures" / f"{safe_name}@{version}.sig"
     with open(sig_path, "wb") as f:
         f.write(signature)
 
@@ -286,6 +291,47 @@ def suggest_models_on_hf(query):
     matches = process.extract(query, model_ids, limit=3, score_cutoff=70)
     return matches
 
+def download_and_store_model(model_id):
+    try:
+        # Download full model snapshot to cache directory
+        local_dir = snapshot_download(repo_id=model_id, repo_type="model")
+
+        # Archive downloaded folder into one file (for consistent storage)
+        archive_path = shutil.make_archive(base_name=local_dir, format='zip', root_dir=local_dir)
+        archive_path = Path(archive_path)
+        
+        # Generate hash like publish_model()
+        model_hash = sha256sum(archive_path)
+        dest_path = VAULT_DIR / "models" / model_hash
+        shutil.copy2(archive_path, dest_path)
+        print(f"[+] Model stored as: {dest_path.name}")
+
+        # Build provenance
+        provenance = {
+            "name": model_id,
+            "version": "hf-latest",
+            "hash": model_hash,
+            "original_filename": archive_path.name,
+            "source": "huggingface",
+            "created_at": datetime.utcnow().isoformat() + "Z",
+        }
+        
+        safe_id = safe_filename(model_id)
+
+        prov_path = VAULT_DIR / "provenance" / f"{safe_id}@hf-latest.json"
+        with open(prov_path, "w") as f:
+            json.dump(provenance, f, indent=2)
+
+        print(f"[+] Provenance written to: {prov_path.name}")
+        sign_provenance(model_id, "hf-latest")
+        print(f"[✓] Download complete and securely stored!{RESET}")
+
+    except Exception as e:
+        print(f"{RED}[x] Failed to download and store model: {e}{RESET}")
+
+def safe_filename(model_id):
+    return model_id.replace("/", "__")
+
 
 def main():
     parser = argparse.ArgumentParser(prog="kittino", description="Kittino: Local AI model package manager")
@@ -331,6 +377,13 @@ def main():
         model_id = args.model_id
         org = model_id.split('/')[0]
 
+        # First: namespace fuzzy matching
+        namespace_match = process.extractOne(org, TRUSTED_PUBLISHERS, score_cutoff=80)
+        if namespace_match and org not in TRUSTED_PUBLISHERS:
+            print(f"{YELLOW}[!] Publisher '{org}' may be a typo.{RESET}")
+            print(f"Did you mean publisher: '{namespace_match[0]}'? (confidence: {namespace_match[1]:.1f}%)")
+
+        # Then: full model ID check
         if not model_exists_on_hf(model_id):
             print(f"{RED}[x] Model '{model_id}' not found on Hugging Face.{RESET}")
             suggestions = suggest_models_on_hf(model_id)
@@ -342,12 +395,17 @@ def main():
                 print(f"{YELLOW}No similar models found.{RESET}")
             return
 
+        # After successful model existence check
         if org not in TRUSTED_PUBLISHERS:
             print(f"{YELLOW}[!] Warning: '{org}' is not in your trusted publishers list.{RESET}")
             print("You may be installing from an untrusted source.")
         else:
             print(f"{GREEN}[✓] Model exists and trusted publisher detected: '{org}'{RESET}")
-        print(f"{GREEN}[✓] Model '{model_id}' is ready for download (not implemented yet).{RESET}")
+
+        print(f"{GREEN}[✓] Downloading model '{model_id}'...{RESET}")
+        download_and_store_model(model_id)
+
+
     else:
         parser.print_help()
 
