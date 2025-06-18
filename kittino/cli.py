@@ -76,6 +76,13 @@ def sign_provenance(name, version):
     print(f"[✓] Signed provenance → {sig_path.name}")
     
 def publish_model(model_path, name, version):
+    # Auto-generate key if missing
+    private_key_path = Path.home() / ".kittino" / "keys" / "private_key.pem"
+    if not private_key_path.exists():
+        print(f"{YELLOW}[!] No private key found. Generating new signing key...{RESET}")
+        generate_keys()
+    else:
+        print(f"[✓] Found existing private key.")
     model_path = Path(model_path)
     if not model_path.exists():
         print(f"{RED}[x] Model file not found.{RESET}")
@@ -103,10 +110,13 @@ def publish_model(model_path, name, version):
     else:
         print(f"[=] Model file already stored (hash matched): {dest_path.name}")
 
-    # 5️⃣ Warn if identical hash was already published under another version
+    # 5️⃣ Prevent if identical hash was already published under another version
     if existing_entry:
         existing_name, existing_version = existing_entry
-        print(f"{YELLOW}[!] Warning: identical model hash was already published as {existing_name}@{existing_version}{RESET}")
+        print(f"{RED}[x] Identical model hash was already published as {existing_name}@{existing_version}.")
+        print(f"{RED}Cannot re-publish same model under different version.{RESET}")
+        return
+
 
     # 6️⃣ Build provenance metadata
     provenance = {
@@ -178,7 +188,7 @@ def generate_keys():
     public_key_path = keys_dir / "public_key.pem"
 
     if private_key_path.exists():
-        print("⚠️ Keys already exist. Aborting.")
+        print("[!] Keys already exist. Aborting.")
         return
 
     private_key = Ed25519PrivateKey.generate()
@@ -197,7 +207,7 @@ def generate_keys():
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         ))
 
-    print("✅ Signing keys generated and saved to ~/.kittino/keys/")
+    print("[✓] Signing keys generated and saved to ~/.kittino/keys/")
     
 def audit_model(name, version):
     # ANSI color codes
@@ -377,7 +387,7 @@ def main():
     subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("init", help="Initialize the local Kittino vault")
-    subparsers.add_parser("keygen", help="Generate a signing keypair")
+    #subparsers.add_parser("keygen", help="Generate a signing keypair")
     subparsers.add_parser("list", help="List all published models in the vault")
     install_parser = subparsers.add_parser("install", help="Install a model from Hugging Face")
 
@@ -406,8 +416,8 @@ def main():
         publish_model(args.model_path, args.name, args.version)
     elif args.command == "verify":
         verify_model(args.name, args.version)
-    elif args.command == "keygen":
-        generate_keys()
+    #elif args.command == "keygen":
+        #generate_keys()
     elif args.command == "audit":
         audit_model(args.name, args.version)
     elif args.command == "list":
