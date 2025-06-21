@@ -149,6 +149,12 @@ def verify_model(name, version):
     with open(provenance_path, "rb") as f:
         prov_bytes = f.read()
         provenance = json.loads(prov_bytes)
+        
+        if provenance.get("source") == "huggingface":
+            print(f"{GREEN}[✓] This model was installed from Hugging Face (source: huggingface).{RESET}")
+        print(f"{YELLOW}[!] Verify not applicable for external models.{RESET}")
+        return
+
 
     expected_hash = provenance["hash"]
     model_path = VAULT_DIR / "models" / expected_hash
@@ -221,13 +227,21 @@ def audit_model(name, version):
 
     print(f"🔍 Auditing {name}@{version}...")
     provenance_path = VAULT_DIR / "provenance" / f"{name}@{version}.json"
+
     if not provenance_path.exists():
         print(f"{RED}[x] Provenance file not found.{RESET}")
         return
+    
 
     with open(provenance_path, "rb") as f:
         prov_bytes = f.read()
         provenance = json.loads(prov_bytes)
+        
+        if provenance.get("source") == "huggingface":
+            print(f"{GREEN}[✓] This model was installed from Hugging Face (source: huggingface).{RESET}")
+        print(f"{YELLOW}[!] Audit not applicable for external models.{RESET}")
+        return
+
 
     issues_found = False
 
@@ -310,7 +324,11 @@ def list_models():
             name = data.get("name", "unknown")
             version = data.get("version", "unknown")
             created = data.get("created_at", "N/A")
-            print(f"  [✓] {name}@{version}  |  created_at: {created}")
+            source = data.get("source", "local")
+            if source == "huggingface":
+                print(f"  [✓] {name}@{version} (source: huggingface) | created_at: {created}")
+            else:
+                print(f"  [✓] {name}@{version} | created_at: {created}")
         except Exception as e:
             print(f"{RED}[x] Failed to read {prov_file.name}: {e}{RESET}")
             
@@ -332,36 +350,24 @@ def download_and_store_model(model_id):
     try:
         # Download full model snapshot to cache directory
         local_dir = snapshot_download(repo_id=model_id, repo_type="model")
+        print(f"[✓] Model downloaded from Hugging Face: {local_dir}")
 
-        # Archive downloaded folder into one file (for consistent storage)
-        archive_path = shutil.make_archive(base_name=local_dir, format='zip', root_dir=local_dir)
-        archive_path = Path(archive_path)
-        
-        # Generate hash like publish_model()
-        model_hash = sha256sum(archive_path)
-        dest_path = VAULT_DIR / "models" / model_hash
-        shutil.copy2(archive_path, dest_path)
-        print(f"[+] Model stored as: {dest_path.name}")
-
-        # Build provenance
+        # Save provenance only
         provenance = {
             "name": model_id,
             "version": "hf-latest",
-            "hash": model_hash,
-            "original_filename": archive_path.name,
             "source": "huggingface",
             "created_at": datetime.utcnow().isoformat() + "Z",
         }
         
         safe_id = safe_filename(model_id)
-
         prov_path = VAULT_DIR / "provenance" / f"{safe_id}@hf-latest.json"
+
         with open(prov_path, "w") as f:
             json.dump(provenance, f, indent=2)
 
-        print(f"[+] Provenance written to: {prov_path.name}")
-        sign_provenance(model_id, "hf-latest")
-        print(f"[✓] Download complete and securely stored!{RESET}")
+        print(f"[✓] Entry recorded in provenance (source: huggingface): {prov_path.name}")
+        print(f"[✓] Download complete!{RESET}")
 
     except Exception as e:
         print(f"{RED}[x] Failed to download and store model: {e}{RESET}")
@@ -449,7 +455,7 @@ def main():
             return
 
         # After successful model existence check
-        if org not in TRUSTED_PUBLISHERS:
+        if org not in HF_TRUSTED_PUBLISHERS:
             print(f"{YELLOW}[!] Warning: '{org}' is not in your trusted publishers list.{RESET}")
             print("You may be installing from an untrusted source.")
         else:
