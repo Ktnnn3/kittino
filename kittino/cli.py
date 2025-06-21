@@ -14,26 +14,30 @@ from rapidfuzz import process
 
 from huggingface_hub import snapshot_download
 
+import yaml
+
 
 
 # path to kittino project -> create "vault" folder from home directory
 VAULT_DIR = Path.home() / ".kittino" / "vault"
+
+def load_hf_trusted_publishers():
+    path = Path.home() / ".kittino" / "trusted_publishers" / "huggingface.yaml"
+    if not path.exists():
+        print(f"{YELLOW}[!] Warning: No huggingface.yaml found — trust list will be empty.{RESET}")
+        return []
+    with open(path, "r") as f:
+        data = yaml.safe_load(f)
+    return data.get("trusted_publishers", [])
+
+# Load trusted publishers once at startup
+HF_TRUSTED_PUBLISHERS = load_hf_trusted_publishers()
 
 # ANSI color codes for formatted CLI output
 RED = "\033[91m"
 YELLOW = "\033[93m"
 GREEN = "\033[92m"
 RESET = "\033[0m"
-
-TRUSTED_PUBLISHERS = [
-    "openai",
-    "meta",
-    "google",
-    "microsoft",
-    "stabilityai",
-    "facebook",
-    "anthropic"
-]
 
 
 
@@ -427,8 +431,8 @@ def main():
         org = model_id.split('/')[0]
 
         # First: namespace fuzzy matching
-        namespace_match = process.extractOne(org, TRUSTED_PUBLISHERS, score_cutoff=80)
-        if namespace_match and org not in TRUSTED_PUBLISHERS:
+        namespace_match = process.extractOne(org, HF_TRUSTED_PUBLISHERS, score_cutoff=80)
+        if namespace_match and org not in HF_TRUSTED_PUBLISHERS:
             print(f"{YELLOW}[!] Publisher '{org}' may be a typo.{RESET}")
             print(f"Did you mean publisher: '{namespace_match[0]}'? (confidence: {namespace_match[1]:.1f}%)")
 
