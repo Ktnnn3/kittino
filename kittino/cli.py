@@ -79,7 +79,7 @@ def sign_provenance(name, version):
 
     print(f"[✓] Signed provenance → {sig_path.name}")
     
-def publish_model(model_path, name, version):
+def publish_model(model_path, name, version, publisher):
     # Auto-generate key if missing
     private_key_path = Path.home() / ".kittino" / "keys" / "private_key.pem"
     if not private_key_path.exists():
@@ -121,13 +121,26 @@ def publish_model(model_path, name, version):
         print(f"{RED}Cannot re-publish same model under different version.{RESET}")
         return
 
+    # 6️⃣ Load public key to store in provenance
+    public_key_path = Path.home() / ".kittino" / "keys" / "public_key.pem"
+    with open(public_key_path, "rb") as f:
+        public_key = serialization.load_pem_public_key(f.read())
+        public_key_bytes = public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        ).decode("utf-8")
 
-    # 6️⃣ Build provenance metadata
+    # 7️⃣ Build provenance metadata
     provenance = {
         "name": name,
         "version": version,
         "hash": model_hash,
         "original_filename": model_path.name,
+        "publisher": publisher,
+        "publisher_key": public_key_bytes,
+        "signed_by": publisher,
+        "signature_created_at": datetime.utcnow().isoformat() + "Z",
+        "attack_detected_count": 0,
         "created_at": datetime.utcnow().isoformat() + "Z",
     }
 
@@ -139,30 +152,26 @@ def publish_model(model_path, name, version):
     print(f"[✓] Publish complete!{RESET}")
 
 
-
 def verify_model(name, version):
     provenance_path = VAULT_DIR / "provenance" / f"{name}@{version}.json"
     if not provenance_path.exists():
-        print(f"{RED}[x] Model file not found.{RESET}")
+        print(f"{RED}[x] Provenance file not found.{RESET}")
         return
 
     with open(provenance_path, "rb") as f:
         prov_bytes = f.read()
         provenance = json.loads(prov_bytes)
-        
-        if provenance.get("source") == "huggingface":
-            print(f"{GREEN}[✓] This model was installed from Hugging Face (source: huggingface).{RESET}")
+
+    if provenance.get("source") == "huggingface":
+        print(f"{GREEN}[✓] This model was installed from Hugging Face (source: huggingface).{RESET}")
         print(f"{YELLOW}[!] Verify not applicable for external models.{RESET}")
         return
 
-
     expected_hash = provenance["hash"]
     model_path = VAULT_DIR / "models" / expected_hash
-
-    integrity_ok = False
     if not model_path.exists():
         print(f"{RED}[x] Model file not found in vault.{RESET}")
-        return  # 🛑 Don't proceed if model is missing
+        return
 
     actual_hash = sha256sum(model_path)
     if actual_hash != expected_hash:
@@ -176,7 +185,6 @@ def verify_model(name, version):
     if sig_path.exists() and public_key_path.exists():
         with open(public_key_path, "rb") as f:
             public_key = serialization.load_pem_public_key(f.read())
-
         with open(sig_path, "rb") as f:
             signature = f.read()
 
@@ -220,33 +228,48 @@ def generate_keys():
     print("[✓] Signing keys generated and saved to ~/.kittino/keys/")
     
 def audit_model(name, version):
-    # ANSI color codes
-    RED = "\033[91m"
-    YELLOW = "\033[93m"
-    RESET = "\033[0m"
-
     print(f"🔍 Auditing {name}@{version}...")
     provenance_path = VAULT_DIR / "provenance" / f"{name}@{version}.json"
 
     if not provenance_path.exists():
         print(f"{RED}[x] Provenance file not found.{RESET}")
         return
-    
 
     with open(provenance_path, "rb") as f:
         prov_bytes = f.read()
         provenance = json.loads(prov_bytes)
-        
-        if provenance.get("source") == "huggingface":
-            print(f"{GREEN}[✓] This model was installed from Hugging Face (source: huggingface).{RESET}")
+
+    if provenance.get("source") == "huggingface":
+        print(f"{GREEN}[✓] This model was installed from Hugging Face (source: huggingface).{RESET}")
         print(f"{YELLOW}[!] Audit not applicable for external models.{RESET}")
         return
 
+    # Load trusted publishers
+    trusted_path = Path.home() / ".kittino" / "trusted_publishers" / "kittino_registry.yaml"
+    trusted_publishers = {}
+    if trusted_path.exists():
+        with open(trusted_path, "r") as f:
+            trusted_publishers = yaml.safe_load(f).get("trusted_publishers", {})
+
+    # Check publisher trust
+    publisher = provenance.get("publisher", "unknown")
+    print(f"[✓] Publisher: {publisher}")
+
+    if publisher in trusted_publishers:
+        print(f"[✓] Publisher is trusted")
+        pubkey_pem = trusted_publishers[publisher]["public_key"]
+    else:
+        print(f"{YELLOW}[!] Publisher is not in trusted list{RESET}")
+        # fallback: use own key
+        public_key_path = Path.home() / ".kittino" / "keys" / "public_key.pem"
+        with open(public_key_path, "r") as f:
+            pubkey_pem = f.read()
+
+    public_key = serialization.load_pem_public_key(pubkey_pem.encode("utf-8"))
 
     issues_found = False
 
-    # Check required fields
-    required_fields = ["hash", "created_at"]
+    required_fields = ["hash", "created_at", "signature_created_at"]
     for field in required_fields:
         if field not in provenance:
             print(f"{RED}[x] Missing required field in provenance: {field}{RESET}")
@@ -254,10 +277,9 @@ def audit_model(name, version):
         else:
             print(f"[✓] {field} present in provenance")
 
-    # Check model existence and hash
     expected_hash = provenance.get("hash")
     model_path = VAULT_DIR / "models" / expected_hash
-    # print(f"DEBUG: model_path = {model_path}")
+
     if not model_path.exists():
         print(f"{RED}[x] Model file missing{RESET}")
         issues_found = True
@@ -269,23 +291,8 @@ def audit_model(name, version):
         else:
             print(f"[✓] Model hash matches provenance")
 
-        # Check for risky extensions
-        original_filename = provenance.get("original_filename", "").lower()
-        ext = Path(original_filename).suffix.lower()
-
-        if ext in [".pkl", ".pt", ".joblib"]:
-            print(f"{YELLOW}[!] Model format is potentially unsafe: {ext}{RESET}")
-            issues_found = True
-        else:
-            print(f"[✓] Model format appears safe: {ext}")
-
-    # Signature verification
     sig_path = VAULT_DIR / "signatures" / f"{name}@{version}.sig"
-    public_key_path = Path.home() / ".kittino" / "keys" / "public_key.pem"
-    if sig_path.exists() and public_key_path.exists():
-        with open(public_key_path, "rb") as f:
-            public_key = serialization.load_pem_public_key(f.read())
-
+    if sig_path.exists():
         with open(sig_path, "rb") as f:
             signature = f.read()
 
@@ -296,13 +303,19 @@ def audit_model(name, version):
             print(f"{RED}[x] Signature verification failed!{RESET}")
             issues_found = True
     else:
-        print(f"{YELLOW}[!] Signature or public key missing{RESET}")
+        print(f"{YELLOW}[!] Signature not found. Skipping authenticity check.{RESET}")
         issues_found = True
 
-    if not issues_found:
-        print(f"\033[92m[✓] Audit complete: no critical issues found.{RESET}")
-    else:
+    if issues_found:
+        provenance["attack_detected_count"] = provenance.get("attack_detected_count", 0) + 1
+        with open(provenance_path, "w") as f:
+            json.dump(provenance, f, indent=2)
+        print(f"{YELLOW}[!] attack_detected_count incremented to {provenance['attack_detected_count']}{RESET}")
         print(f"{YELLOW}[!] Audit complete: issues were found.{RESET}")
+    else:
+        print(f"[✓] the number of this model got attacked : {provenance.get('attack_detected_count', 0)}")
+        print(f"\033[92m[✓] Audit complete: no critical issues found.{RESET}")
+
         
 def list_models():
     provenance_dir = VAULT_DIR / "provenance"
@@ -406,6 +419,8 @@ def main():
     publish_parser.add_argument("model_path", help="Path to the model file")
     publish_parser.add_argument("--name", required=True, help="Model name")
     publish_parser.add_argument("--version", required=True, help="Model version")
+    publish_parser.add_argument("--publisher", required=True, help="Publisher name")
+
 
     verify_parser = subparsers.add_parser("verify", help="Verify model integrity and signature")
     verify_parser.add_argument("--name", required=True, help="Model name")
@@ -423,7 +438,7 @@ def main():
     if args.command == "init":
         init_registry()
     elif args.command == "publish":
-        publish_model(args.model_path, args.name, args.version)
+        publish_model(args.model_path, args.name, args.version, args.publisher)
     elif args.command == "verify":
         verify_model(args.name, args.version)
     #elif args.command == "keygen":
