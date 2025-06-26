@@ -412,8 +412,6 @@ def main():
     subparsers.add_parser("init", help="Initialize the local Kittino vault")
     #subparsers.add_parser("keygen", help="Generate a signing keypair")
     subparsers.add_parser("list", help="List all published models in the vault")
-    install_parser = subparsers.add_parser("install", help="Install a model from Hugging Face")
-
 
     publish_parser = subparsers.add_parser("publish", help="Publish a new model")
     publish_parser.add_argument("model_path", help="Path to the model file")
@@ -430,7 +428,14 @@ def main():
     audit_parser.add_argument("--name", required=True, help="Model name")
     audit_parser.add_argument("--version", required=True, help="Model version")
     
-    install_parser.add_argument("model_id", help="Model ID (e.g. openai/whisper-large-v3-turbo)")
+    install_parser = subparsers.add_parser("install", help="Install a model from local Kittino registry")
+    install_parser.add_argument("--name", required=True, help="Model name")
+    install_parser.add_argument("--version", required=True, help="Model version")
+
+
+    install_hf_parser = subparsers.add_parser("install-hf", help="Install a model from Hugging Face")
+    install_hf_parser.add_argument("model_id", help="Model ID (e.g. openai/whisper-large-v3-turbo)")
+
 
 
     args = parser.parse_args()
@@ -447,17 +452,15 @@ def main():
         audit_model(args.name, args.version)
     elif args.command == "list":
         list_models()
-    elif args.command == "install":
+    elif args.command == "install-hf":
         model_id = args.model_id
         org = model_id.split('/')[0]
 
-        # First: namespace fuzzy matching
         namespace_match = process.extractOne(org, HF_TRUSTED_PUBLISHERS, score_cutoff=80)
         if namespace_match and org not in HF_TRUSTED_PUBLISHERS:
             print(f"{YELLOW}[!] Publisher '{org}' may be a typo.{RESET}")
             print(f"Did you mean publisher: '{namespace_match[0]}'? (confidence: {namespace_match[1]:.1f}%)")
 
-        # Then: full model ID check
         if not model_exists_on_hf(model_id):
             print(f"{RED}[x] Model '{model_id}' not found on Hugging Face.{RESET}")
             suggestions = suggest_models_on_hf(model_id)
@@ -469,7 +472,6 @@ def main():
                 print(f"{YELLOW}No similar models found.{RESET}")
             return
 
-        # After successful model existence check
         if org not in HF_TRUSTED_PUBLISHERS:
             print(f"{YELLOW}[!] Warning: '{org}' is not in your trusted publishers list.{RESET}")
             print("You may be installing from an untrusted source.")
@@ -479,6 +481,61 @@ def main():
         print(f"{GREEN}[✓] Downloading model '{model_id}'...{RESET}")
         download_and_store_model(model_id)
 
+    elif args.command == "install":
+        name = args.name
+        version = args.version
+        safe_name = safe_filename(name)
+
+        prov_path = VAULT_DIR / "provenance" / f"{safe_name}@{version}.json"
+        if not prov_path.exists():
+            print(f"{RED}[x] Model {name}@{version} not found in registry.{RESET}")
+        
+            # Suggest similar entries
+            provenance_dir = VAULT_DIR / "provenance"
+            all_entries = [p.stem for p in provenance_dir.glob("*.json")]
+            suggestions = process.extract(f"{name}@{version}", all_entries, limit=3, score_cutoff=70)
+    
+            if suggestions:
+                print(f"{YELLOW}Did you mean:{RESET}")
+                for match in suggestions:
+                    print(f"  - {match[0]}  (confidence: {match[1]:.1f}%)")
+            else:
+                print(f"{YELLOW}No similar models found.{RESET}")
+            return
+
+        with open(prov_path, "r") as f:
+            provenance = json.load(f)
+
+        if provenance.get("source") == "huggingface":
+            print(f"{YELLOW}[!] This model is from Hugging Face. Use 'kittino install-hf' instead.{RESET}")
+            return
+
+        # Load trusted publishers
+        trusted_path = Path.home() / ".kittino" / "trusted_publishers" / "kittino_registry.yaml"
+        trusted_publishers = {}
+        if trusted_path.exists():
+            with open(trusted_path, "r") as f:
+                trusted_publishers = yaml.safe_load(f).get("trusted_publishers", {})
+
+        publisher = provenance.get("publisher", "unknown")
+        if publisher not in trusted_publishers:
+            print(f"{YELLOW}[!] Publisher '{publisher}' is not trusted. Proceed with caution.{RESET}")
+        else:
+            print(f"{GREEN}[✓] Publisher '{publisher}' is trusted.{RESET}")
+
+        # Copy model to ./installed_models/
+        model_hash = provenance["hash"]
+        src_model_path = VAULT_DIR / "models" / model_hash
+        if not src_model_path.exists():
+            print(f"{RED}[x] Model file not found in vault.{RESET}")
+            return
+
+        dest_dir = Path.cwd() / "installed_models"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest_path = dest_dir / provenance["original_filename"]
+        shutil.copy2(src_model_path, dest_path)
+
+        print(f"{GREEN}[✓] Model installed to: {dest_path}{RESET}")
 
     else:
         parser.print_help()
