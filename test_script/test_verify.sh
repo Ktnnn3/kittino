@@ -11,7 +11,7 @@ SIG_PATH="$HOME/.kittino/vault/signatures/$NAME@$VERSION.sig"
 
 echo -e "\n[1] ✅ Clean baseline"
 echo "fake model" > "$MODEL_FILE"
-python3 kittino/cli.py publish "$MODEL_FILE" --name "$NAME" --version "$VERSION"
+python3 kittino/cli.py publish "$MODEL_FILE" --name "$NAME" --version "$VERSION" --publisher "$NAME"
 python3 kittino/cli.py verify --name "$NAME" --version "$VERSION"
 
 HASH=$(jq -r '.hash' "$PROV_PATH")

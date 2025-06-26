@@ -11,7 +11,7 @@ echo -e "\n🔍 Running Kittino audit tests..."
 
 echo -e "\n[0] ✅ Clean setup"
 echo "fake model content" > "$MODEL_FILE"
-python3 kittino/cli.py publish "$MODEL_FILE" --name "$NAME" --version "$VERSION"
+python3 kittino/cli.py publish "$MODEL_FILE" --name "$NAME" --version "$VERSION" --publisher "$NAME"
 python3 kittino/cli.py audit --name "$NAME" --version "$VERSION"
 
 HASH=$(jq -r '.hash' "$PROV_PATH")
