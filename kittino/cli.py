@@ -17,6 +17,8 @@ from huggingface_hub import snapshot_download
 import yaml
 
 
+# Blocklist of dangerous model file extensions
+DANGEROUS_EXTENSIONS = {".pkl", ".pickle", ".joblib", ".h5"}
 
 # path to kittino project -> create "vault" folder from home directory
 VAULT_DIR = Path.home() / ".kittino" / "vault"
@@ -87,7 +89,15 @@ def publish_model(model_path, name, version, publisher):
         generate_keys()
     else:
         print(f"[✓] Found existing private key.")
+
     model_path = Path(model_path)
+
+    # ❗ Reject dangerous formats to prevent code execution
+    if model_path.suffix.lower() in DANGEROUS_EXTENSIONS:
+        print(f"{RED}[x] Rejected: Model format '{model_path.suffix}' is unsafe for publishing due to code execution risk.{RESET}")
+        print(f"{YELLOW}[!] Please convert it to a safer format like .pt, .onnx, or .bin.{RESET}")
+        return
+
     if not model_path.exists():
         print(f"{RED}[x] Model file not found.{RESET}")
         return
@@ -364,6 +374,16 @@ def download_and_store_model(model_id):
         # Download full model snapshot to cache directory
         local_dir = snapshot_download(repo_id=model_id, repo_type="model")
         print(f"[✓] Model downloaded from Hugging Face: {local_dir}")
+        
+        # Check for risky files and warn user
+        risky_files = [f for f in Path(local_dir).rglob("*") if f.suffix.lower() in DANGEROUS_EXTENSIONS]
+        if risky_files:
+            print(f"{YELLOW}[!] WARNING: This Hugging Face model contains potentially unsafe files:")
+            for rf in risky_files:
+                print(f"    ⚠️  {rf.relative_to(local_dir)}")
+            print(f"    These formats can execute code during loading (e.g., via pickle.load).")
+            print(f"    Only use this model if you fully trust the source.{RESET}")
+
 
         # Save provenance only
         provenance = {
