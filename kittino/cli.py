@@ -9,6 +9,7 @@ from datetime import datetime
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey # type: ignore
 from cryptography.hazmat.primitives import serialization # type: ignore
 
+
 import requests
 from rapidfuzz import process
 
@@ -20,20 +21,54 @@ import yaml
 # Blocklist of dangerous model file extensions
 DANGEROUS_EXTENSIONS = {".pkl", ".pickle", ".joblib", ".h5"}
 
+TRUSTED_HF_PATH = Path.home() / ".kittino" / "trusted_publishers" / "huggingface.yaml"
+TRUSTED_LOCAL_PATH = Path.home() / ".kittino" / "trusted_publishers" / "kittino_registry.yaml"
+
 # path to kittino project -> create "vault" folder from home directory
 VAULT_DIR = Path.home() / ".kittino" / "vault"
 
-def load_hf_trusted_publishers():
-    path = Path.home() / ".kittino" / "trusted_publishers" / "huggingface.yaml"
+def load_trusted_list(hf=False):
+    path = TRUSTED_HF_PATH if hf else TRUSTED_LOCAL_PATH
     if not path.exists():
-        print(f"{YELLOW}[!] Warning: No huggingface.yaml found — trust list will be empty.{RESET}")
         return []
     with open(path, "r") as f:
-        data = yaml.safe_load(f)
+        data = yaml.safe_load(f) or {}
     return data.get("trusted_publishers", [])
 
-# Load trusted publishers once at startup
-HF_TRUSTED_PUBLISHERS = load_hf_trusted_publishers()
+def save_trusted_list(publishers, hf=False):
+    path = TRUSTED_HF_PATH if hf else TRUSTED_LOCAL_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        yaml.dump({"trusted_publishers": sorted(set(publishers))}, f)
+
+def add_trusted_publisher(name, hf=False):
+    trusted = load_trusted_list(hf)
+    if name in trusted:
+        print(f"[!] Publisher '{name}' is already trusted.")
+    else:
+        trusted.append(name)
+        save_trusted_list(trusted, hf)
+        print(f"[+] Added trusted publisher: {name}")
+
+def remove_trusted_publisher(name, hf=False):
+    trusted = load_trusted_list(hf)
+    if name not in trusted:
+        print(f"[!] Publisher '{name}' not found in trust list.")
+    else:
+        trusted.remove(name)
+        save_trusted_list(trusted, hf)
+        print(f"[-] Removed publisher: {name}")
+
+def list_trusted_publishers():
+    local = load_trusted_list(hf=False)
+    hf = load_trusted_list(hf=True)
+    print("\nTrusted Local Publishers:")
+    for p in local:
+        print(f"  - {p}")
+    print("\nTrusted Hugging Face Publishers:")
+    for p in hf:
+        print(f"  - {p}")
+
 
 # ANSI color codes for formatted CLI output
 RED = "\033[91m"
@@ -254,31 +289,19 @@ def audit_model(name, version):
         print(f"{YELLOW}[!] Audit not applicable for external models.{RESET}")
         return
 
-    # Load trusted publishers
-    trusted_path = Path.home() / ".kittino" / "trusted_publishers" / "kittino_registry.yaml"
-    trusted_publishers = {}
-    if trusted_path.exists():
-        with open(trusted_path, "r") as f:
-            trusted_publishers = yaml.safe_load(f).get("trusted_publishers", {})
-
-    # Check publisher trust
     publisher = provenance.get("publisher", "unknown")
     print(f"[✓] Publisher: {publisher}")
 
+    # Load trust list and check if publisher is trusted
+    trusted_publishers = load_trusted_list(hf=False)
     if publisher in trusted_publishers:
         print(f"[✓] Publisher is trusted")
-        pubkey_pem = trusted_publishers[publisher]["public_key"]
     else:
         print(f"{YELLOW}[!] Publisher is not in trusted list{RESET}")
-        # fallback: use own key
-        public_key_path = Path.home() / ".kittino" / "keys" / "public_key.pem"
-        with open(public_key_path, "r") as f:
-            pubkey_pem = f.read()
-
-    public_key = serialization.load_pem_public_key(pubkey_pem.encode("utf-8"))
 
     issues_found = False
 
+    # Validate fields
     required_fields = ["hash", "created_at", "signature_created_at"]
     for field in required_fields:
         if field not in provenance:
@@ -287,6 +310,7 @@ def audit_model(name, version):
         else:
             print(f"[✓] {field} present in provenance")
 
+    # Check model file integrity
     expected_hash = provenance.get("hash")
     model_path = VAULT_DIR / "models" / expected_hash
 
@@ -301,8 +325,13 @@ def audit_model(name, version):
         else:
             print(f"[✓] Model hash matches provenance")
 
+    # Signature verification
     sig_path = VAULT_DIR / "signatures" / f"{name}@{version}.sig"
-    if sig_path.exists():
+    public_key_path = Path.home() / ".kittino" / "keys" / "public_key.pem"
+
+    if sig_path.exists() and public_key_path.exists():
+        with open(public_key_path, "rb") as f:
+            public_key = serialization.load_pem_public_key(f.read())
         with open(sig_path, "rb") as f:
             signature = f.read()
 
@@ -310,10 +339,10 @@ def audit_model(name, version):
             public_key.verify(signature, prov_bytes)
             print(f"[✓] Signature is valid")
         except Exception:
-            print(f"{RED}[x] Signature verification failed!{RESET}")
+            print(f"{RED}[x] Signature verification failed! Provenance may be untrusted.{RESET}")
             issues_found = True
     else:
-        print(f"{YELLOW}[!] Signature not found. Skipping authenticity check.{RESET}")
+        print(f"{YELLOW}[!] Signature or public key not found. Skipping authenticity check.{RESET}")
         issues_found = True
 
     if issues_found:
@@ -324,8 +353,7 @@ def audit_model(name, version):
         print(f"{YELLOW}[!] Audit complete: issues were found.{RESET}")
     else:
         print(f"[✓] the number of this model got attacked : {provenance.get('attack_detected_count', 0)}")
-        print(f"\033[92m[✓] Audit complete: no critical issues found.{RESET}")
-
+        print(f"{GREEN}[✓] Audit complete: no critical issues found.{RESET}")
         
 def list_models():
     provenance_dir = VAULT_DIR / "provenance"
@@ -455,6 +483,16 @@ def main():
 
     install_hf_parser = subparsers.add_parser("install-hf", help="Install a model from Hugging Face")
     install_hf_parser.add_argument("model_id", help="Model ID (e.g. openai/whisper-large-v3-turbo)")
+    
+    trust_parser = subparsers.add_parser("trust", help="Manage local trusted publishers")
+    trust_parser.add_argument("name", nargs="?", help="Publisher name to add")
+    trust_parser.add_argument("--remove", help="Publisher to remove")
+    trust_parser.add_argument("--list", action="store_true", help="List trusted publishers")
+
+    trust_hf_parser = subparsers.add_parser("trust-hf", help="Manage Hugging Face trusted publishers")
+    trust_hf_parser.add_argument("name", nargs="?", help="HF publisher name to add")
+    trust_hf_parser.add_argument("--remove", help="HF publisher to remove")
+
 
 
 
@@ -557,6 +595,23 @@ def main():
 
         print(f"{GREEN}[✓] Model installed to: {dest_path}{RESET}")
 
+    elif args.command == "trust":
+        if args.list:
+            list_trusted_publishers()
+        elif args.remove:
+            remove_trusted_publisher(args.remove, hf=False)
+        elif args.name:
+            add_trusted_publisher(args.name, hf=False)
+        else:
+            print("[x] Please specify a publisher name or use --list/--remove")
+
+    elif args.command == "trust-hf":
+        if args.remove:
+            remove_trusted_publisher(args.remove, hf=True)
+        elif args.name:
+            add_trusted_publisher(args.name, hf=True)
+        else:
+            print("[x] Please specify a publisher name or use --remove")
     else:
         parser.print_help()
 
