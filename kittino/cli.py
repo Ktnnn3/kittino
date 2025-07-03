@@ -85,6 +85,21 @@ def init_registry():
         path.mkdir(parents=True, exist_ok=True)
         print(f"[✓] Created directory: {path}")
     print("\nKittino vault initialized successfully!")
+    
+    # Trusted publisher files
+    trust_dir = Path.home() / ".kittino" / "trusted_publishers"
+    trust_dir.mkdir(parents=True, exist_ok=True)
+
+    for fname in ["kittino_registry.yaml", "huggingface.yaml"]:
+        fpath = trust_dir / fname
+        if not fpath.exists():
+            with open(fpath, "w") as f:
+                yaml.dump({"trusted_publishers": []}, f)
+            print(f"[✓] Initialized: {fpath.name}")
+        else:
+            print(f"[=] Already exists: {fpath.name}")
+
+    print(f"\n{GREEN}Kittino vault initialized successfully!{RESET}")
 
 def sha256sum(file_path):
     h = hashlib.sha256()
