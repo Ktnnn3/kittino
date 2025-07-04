@@ -410,13 +410,22 @@ def model_exists_on_hf(model_id):
     return r.status_code == 200
 
 def suggest_models_on_hf(query):
-    search_url = f"https://huggingface.co/api/models?search={query}"
-    r = requests.get(search_url)
-    if r.status_code != 200:
+    if "/" in query:
+        org, _ = query.split("/", 1)
+        search_url = f"https://huggingface.co/api/models?author={org}"
+    else:
+        search_url = f"https://huggingface.co/api/models?search={query}"
+
+    try:
+        r = requests.get(search_url)
+        if r.status_code != 200:
+            return []
+        model_ids = [model["modelId"] for model in r.json()]
+        matches = process.extract(query, model_ids, limit=5, score_cutoff=70)
+        return matches
+    except Exception:
         return []
-    model_ids = [model['modelId'] for model in r.json()]
-    matches = process.extract(query, model_ids, limit=3, score_cutoff=70)
-    return matches
+
 
 def download_and_store_model(model_id):
     try:
@@ -479,6 +488,26 @@ def install_model_kittino(name, version):
 
     if not prov_path.exists():
         print(f"{RED}[x] Model {name}@{version} not found in registry.{RESET}")
+
+        # Try to suggest similar model@version from local registry
+        provenance_dir = VAULT_DIR / "provenance"
+        all_ids = []
+        for prov_file in provenance_dir.glob("*.json"):
+            try:
+                base = prov_file.stem.replace("__", "/")  # undo safe_filename
+                all_ids.append(base)
+            except:
+                continue
+
+        full_name = f"{name}@{version}"
+        suggestions = process.extract(full_name, all_ids, limit=3, score_cutoff=70)
+        if suggestions:
+            print(f"{YELLOW}Did you mean:{RESET}")
+            for match in suggestions:
+                print(f"  - {match[0]}  (confidence: {match[1]:.1f}%)")
+        else:
+            print(f"{YELLOW}No similar models found in registry.{RESET}")
+
         return
 
     with open(prov_path, "r") as f:
@@ -608,8 +637,9 @@ def main():
         model_id = args.model_id
         org = model_id.split('/')[0]
 
-        namespace_match = process.extractOne(org, HF_TRUSTED_PUBLISHERS, score_cutoff=80)
-        if namespace_match and org not in HF_TRUSTED_PUBLISHERS:
+        trusted_hf_publishers = load_trusted_list(hf=True)
+        namespace_match = process.extractOne(org, trusted_hf_publishers, score_cutoff=80)
+        if namespace_match and org not in trusted_hf_publishers:
             print(f"{YELLOW}[!] Publisher '{org}' may be a typo.{RESET}")
             print(f"Did you mean publisher: '{namespace_match[0]}'? (confidence: {namespace_match[1]:.1f}%)")
 
@@ -624,7 +654,7 @@ def main():
                 print(f"{YELLOW}No similar models found.{RESET}")
             return
 
-        if org not in HF_TRUSTED_PUBLISHERS:
+        if org not in trusted_hf_publishers:
             print(f"{YELLOW}[!] Warning: '{org}' is not in your trusted publishers list.{RESET}")
             print("You may be installing from an untrusted source.")
         else:
