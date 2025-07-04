@@ -12,6 +12,8 @@ from cryptography.hazmat.primitives import serialization # type: ignore
 
 import requests
 from rapidfuzz import process
+from rapidfuzz.fuzz import ratio
+
 
 from huggingface_hub import snapshot_download
 
@@ -201,6 +203,7 @@ def publish_model(model_path, name, version, publisher):
         "signed_by": publisher,
         "signature_created_at": datetime.utcnow().isoformat() + "Z",
         "attack_detected_count": 0,
+        "download_count": 0,
         "created_at": datetime.utcnow().isoformat() + "Z",
     }
 
@@ -359,6 +362,9 @@ def audit_model(name, version):
     else:
         print(f"{YELLOW}[!] Signature or public key not found. Skipping authenticity check.{RESET}")
         issues_found = True
+        
+    print(f"[✓] Download count: {provenance.get('download_count', 0)}")
+
 
     if issues_found:
         provenance["attack_detected_count"] = provenance.get("attack_detected_count", 0) + 1
@@ -394,7 +400,7 @@ def list_models():
             if source == "huggingface":
                 print(f"  [✓] {name}@{version} (source: huggingface) | created_at: {created}")
             else:
-                print(f"  [✓] {name}@{version} | created_at: {created}")
+                print(f"  [✓] {name}@{version} | created_at: {created} | downloads: {data.get('download_count', 0)}")
         except Exception as e:
             print(f"{RED}[x] Failed to read {prov_file.name}: {e}{RESET}")
             
@@ -466,6 +472,79 @@ def provenance_exists_for_same_hash(model_hash):
             continue
     return None
 
+
+def install_model_kittino(name, version):
+    safe_name = safe_filename(name)
+    prov_path = VAULT_DIR / "provenance" / f"{safe_name}@{version}.json"
+
+    if not prov_path.exists():
+        print(f"{RED}[x] Model {name}@{version} not found in registry.{RESET}")
+        return
+
+    with open(prov_path, "r") as f:
+        provenance = json.load(f)
+
+    download_count = provenance.get("download_count", 0)
+
+    # 🔍 Check if another model has > 2x downloads
+    provenance_dir = VAULT_DIR / "provenance"
+    all_models = []
+
+    for prov_file in provenance_dir.glob("*.json"):
+        try:
+            with open(prov_file, "r") as f:
+                other = json.load(f)
+                full_name_version = f"{other.get('name', '')}@{other.get('version', '')}"
+                all_models.append((full_name_version, other.get("download_count", 0)))
+        except Exception:
+            continue
+
+    best_match = None
+    for full_name_version, other_downloads in all_models:
+        if full_name_version != f"{name}@{version}":
+            score = ratio(f"{name}@{version}", full_name_version)
+            if score > 75 and download_count * 2 < other_downloads:
+                best_match = (full_name_version, other_downloads)
+                break
+
+    if best_match:
+        print(f"{YELLOW}[?] Warning: '{name}@{version}' has only {download_count} downloads.{RESET}")
+        print(f"{YELLOW}Did you mean: '{best_match[0]}'? ({best_match[1]} downloads){RESET}")
+        answer = input("Type 'yes' to continue with low-download model, or 'no' to cancel: ").strip().lower()
+        if answer != "yes":
+            print(f"{RED}[x] Installation cancelled by user.{RESET}")
+            return
+
+    if provenance.get("source") == "huggingface":
+        print(f"{YELLOW}[!] This model is from Hugging Face. Use 'kittino install-hf' instead.{RESET}")
+        return
+
+    trusted_publishers = load_trusted_list(hf=False)
+    publisher = provenance.get("publisher", "unknown")
+    if publisher not in trusted_publishers:
+        print(f"{YELLOW}[!] Publisher '{publisher}' is not trusted. Proceed with caution.{RESET}")
+    else:
+        print(f"{GREEN}[\u2713] Publisher '{publisher}' is trusted.{RESET}")
+
+    model_hash = provenance["hash"]
+    src_model_path = VAULT_DIR / "models" / model_hash
+    if not src_model_path.exists():
+        print(f"{RED}[x] Model file not found in vault.{RESET}")
+        return
+
+    dest_dir = Path.cwd() / "installed_models"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = dest_dir / provenance["original_filename"]
+    shutil.copy2(src_model_path, dest_path)
+
+    print(f"{GREEN}[\u2713] Model installed to: {dest_path}{RESET}")
+
+    # Update download count
+    provenance["download_count"] = download_count + 1
+    with open(prov_path, "w") as f:
+        json.dump(provenance, f, indent=2)
+
+    print(f"[✓] Download count updated to {provenance['download_count']}")
 
 
 def main():
@@ -555,60 +634,7 @@ def main():
         download_and_store_model(model_id)
 
     elif args.command == "install":
-        name = args.name
-        version = args.version
-        safe_name = safe_filename(name)
-
-        prov_path = VAULT_DIR / "provenance" / f"{safe_name}@{version}.json"
-        if not prov_path.exists():
-            print(f"{RED}[x] Model {name}@{version} not found in registry.{RESET}")
-        
-            # Suggest similar entries
-            provenance_dir = VAULT_DIR / "provenance"
-            all_entries = [p.stem for p in provenance_dir.glob("*.json")]
-            suggestions = process.extract(f"{name}@{version}", all_entries, limit=3, score_cutoff=70)
-    
-            if suggestions:
-                print(f"{YELLOW}Did you mean:{RESET}")
-                for match in suggestions:
-                    print(f"  - {match[0]}  (confidence: {match[1]:.1f}%)")
-            else:
-                print(f"{YELLOW}No similar models found.{RESET}")
-            return
-
-        with open(prov_path, "r") as f:
-            provenance = json.load(f)
-
-        if provenance.get("source") == "huggingface":
-            print(f"{YELLOW}[!] This model is from Hugging Face. Use 'kittino install-hf' instead.{RESET}")
-            return
-
-        # Load trusted publishers
-        trusted_path = Path.home() / ".kittino" / "trusted_publishers" / "kittino_registry.yaml"
-        trusted_publishers = {}
-        if trusted_path.exists():
-            with open(trusted_path, "r") as f:
-                trusted_publishers = yaml.safe_load(f).get("trusted_publishers", {})
-
-        publisher = provenance.get("publisher", "unknown")
-        if publisher not in trusted_publishers:
-            print(f"{YELLOW}[!] Publisher '{publisher}' is not trusted. Proceed with caution.{RESET}")
-        else:
-            print(f"{GREEN}[✓] Publisher '{publisher}' is trusted.{RESET}")
-
-        # Copy model to ./installed_models/
-        model_hash = provenance["hash"]
-        src_model_path = VAULT_DIR / "models" / model_hash
-        if not src_model_path.exists():
-            print(f"{RED}[x] Model file not found in vault.{RESET}")
-            return
-
-        dest_dir = Path.cwd() / "installed_models"
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        dest_path = dest_dir / provenance["original_filename"]
-        shutil.copy2(src_model_path, dest_path)
-
-        print(f"{GREEN}[✓] Model installed to: {dest_path}{RESET}")
+        install_model_kittino(args.name, args.version)
 
     elif args.command == "trust":
         if args.list:
