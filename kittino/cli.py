@@ -660,6 +660,43 @@ def main():
         else:
             print(f"{GREEN}[✓] Model exists and trusted publisher detected: '{org}'{RESET}")
 
+        # ✅ Cross-org suspicious download check
+        try:
+            api_url = f"https://huggingface.co/api/models/{model_id}"
+            resp = requests.get(api_url)
+            if resp.status_code == 200:
+                model_info = resp.json()
+                current_downloads = model_info.get("downloads", 0)
+
+                # Only warn if current model has suspiciously low downloads
+                if current_downloads < 100:
+                    similar_candidates = []
+                    for trusted_org in trusted_hf_publishers:
+                        if trusted_org == org:
+                            continue
+                        trusted_org_url = f"https://huggingface.co/api/models?author={trusted_org}"
+                        r = requests.get(trusted_org_url)
+                        if r.status_code != 200:
+                            continue
+                        for m in r.json():
+                            name = m.get("modelId", "")
+                            downloads = m.get("downloads", 0)
+                            if downloads > current_downloads * 2:
+                                score = ratio(model_id, name)
+                                if score > 75:
+                                    similar_candidates.append((name, downloads, score))
+
+                    if similar_candidates:
+                        best = sorted(similar_candidates, key=lambda x: -x[1])[0]
+                        print(f"{YELLOW}[?] Warning: '{model_id}' has only {current_downloads} downloads.{RESET}")
+                        print(f"{YELLOW}Did you mean: '{best[0]}'? ({best[1]} downloads){RESET}")
+                        answer = input("Type 'yes' to continue with low-download model, or 'no' to cancel: ").strip().lower()
+                        if answer != "yes":
+                            print(f"{RED}[x] Installation cancelled by user.{RESET}")
+                            return
+        except Exception as e:
+            print(f"{YELLOW}[!] Skipping cross-org download check due to error: {e}{RESET}")
+
         print(f"{GREEN}[✓] Downloading model '{model_id}'...{RESET}")
         download_and_store_model(model_id)
 
