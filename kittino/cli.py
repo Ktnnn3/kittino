@@ -430,7 +430,18 @@ def suggest_models_on_hf(query):
 def download_and_store_model(model_id):
     try:
         # Download full model snapshot to cache directory
-        local_dir = snapshot_download(repo_id=model_id, repo_type="model")
+        # ✅ Define destination directory (same as install_model_kittino)
+        dest_dir = Path.cwd() / "installed_models" / safe_filename(model_id)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        # ✅ Download model directly to dest_dir (no cache)
+        local_dir = snapshot_download(
+            repo_id=model_id,
+            repo_type="model",
+            local_dir=dest_dir,              # <- download into installed_models/
+            local_dir_use_symlinks=False     # <- use real files, not symlinks
+        )
+        
         print(f"[✓] Model downloaded from Hugging Face: {local_dir}")
         
         # Check for risky files and warn user
