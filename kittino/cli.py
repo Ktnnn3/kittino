@@ -125,6 +125,18 @@ def sign_provenance(name, version):
     with open(prov_path, "rb") as f:
         prov_bytes = f.read()
 
+    with open(prov_path, "r") as f:
+        provenance = json.load(f)
+
+    # Remove mutable fields before signing
+    provenance_for_signing = dict(provenance)
+    provenance_for_signing.pop("download_count", None)
+    provenance_for_signing.pop("attack_detected_count", None)
+
+    prov_bytes = json.dumps(provenance_for_signing, indent=2).encode("utf-8")
+    signature = private_key.sign(prov_bytes)
+
+    prov_bytes = json.dumps(provenance_for_signing, indent=2).encode("utf-8")
     signature = private_key.sign(prov_bytes)
 
     sig_path = VAULT_DIR / "signatures" / f"{safe_name}@{version}.sig"
@@ -250,6 +262,12 @@ def verify_model(name, version):
             public_key = serialization.load_pem_public_key(f.read())
         with open(sig_path, "rb") as f:
             signature = f.read()
+        
+        # Remove mutable fields before verifying
+        provenance_for_verifying = dict(provenance)
+        provenance_for_verifying.pop("download_count", None)
+        provenance_for_verifying.pop("attack_detected_count", None)
+        prov_bytes = json.dumps(provenance_for_verifying, indent=2).encode("utf-8")
 
         try:
             public_key.verify(signature, prov_bytes)
@@ -352,6 +370,12 @@ def audit_model(name, version):
             public_key = serialization.load_pem_public_key(f.read())
         with open(sig_path, "rb") as f:
             signature = f.read()
+            
+        # Remove mutable fields before verifying
+        provenance_for_verifying = dict(provenance)
+        provenance_for_verifying.pop("download_count", None)
+        provenance_for_verifying.pop("attack_detected_count", None)
+        prov_bytes = json.dumps(provenance_for_verifying, indent=2).encode("utf-8")
 
         try:
             public_key.verify(signature, prov_bytes)
