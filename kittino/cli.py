@@ -344,7 +344,7 @@ def audit_model(name, version):
             print(f"{RED}[x] Missing required field in provenance: {field}{RESET}")
             issues_found = True
         else:
-            print(f"[✓] {field} present in provenance")
+            print(f"[✓] {field} present in provenance: {provenance[field]}")
 
     # Check model file integrity
     expected_hash = provenance.get("hash")
